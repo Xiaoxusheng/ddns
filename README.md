@@ -2,7 +2,7 @@
 
 ### 1.支持阿里云解析
 配置
-···txt
+```txt
 {
   "accessKeyId": "", //阿里云accessKeyId
   "accessKeySecret": "", //阿里云accessKeySecret
