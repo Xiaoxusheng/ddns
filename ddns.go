@@ -131,7 +131,7 @@ func Set(v4, v6 string) bool {
 	request.Type = "AAAA"
 	request.Value = v6
 	request.RR = "@"
-	request.RecordId = "848798676399225856"
+	request.RecordId = "" //自己去查
 	request.Lang = "en"
 	request.UserClientIp = v4
 	response, err := client.UpdateDomainRecord(request)
@@ -142,6 +142,37 @@ func Set(v4, v6 string) bool {
 
 	return response.IsSuccess()
 }
+
+////没有设置过解析的
+//func Add() {
+//	config := sdk.NewConfig()
+//	// Please ensure that the environment variables ALIBABA_CLOUD_ACCESS_KEY_ID and ALIBABA_CLOUD_ACCESS_KEY_SECRET are set.
+//	credential := credentials.NewAccessKeyCredential(os.Getenv("ALIBABA_CLOUD_ACCESS_KEY_ID"), os.Getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET"))
+//	/* use STS Token
+//	credential := credentials.NewStsTokenCredential(os.Getenv("ALIBABA_CLOUD_ACCESS_KEY_ID"), os.Getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET"), os.Getenv("ALIBABA_CLOUD_SECURITY_TOKEN"))
+//	*/
+//	client, err := alidns.NewClientWithOptions("cn-hangzhou", config, credential)
+//	if err != nil {
+//		panic(err)
+//	}
+//	request := alidns.CreateAddDomainRecordRequest()
+//	request.Scheme = "https"
+//	request.Lang = "en"
+//	request.UserClientIp = "192.0.2.0"
+//	request.DomainName = "域名"
+//	request.RR = "@"
+//	request.Type = "AAAA" //
+//	request.Value = ""    //要绑定的ip
+//	request.TTL = requests.NewInteger(600)
+//	request.Priority = requests.NewInteger(1)
+//
+//	response, err := client.AddDomainRecord(request)
+//	if err != nil {
+//		fmt.Print(err.Error())
+//	}
+//
+//	fmt.Printf("response is %#v\n", response)
+//}
 
 func SendEmail(v6, v4 string) {
 	e := email.NewEmail()
@@ -184,10 +215,14 @@ func timing() {
 
 	n, err := file.Read(b)
 	if err != nil {
-		log.Println("文件读取失败" + err.Error())
-		return
+		if err == io.EOF {
+			file.Write([]byte("123"))
+		} else {
+			log.Println("文件读取失败" + err.Error())
+			return
+		}
 	}
-	defer file.Close()
+	file.Close()
 
 	v6 := GetIpv6()
 	v4, ok := GetIpv4()
