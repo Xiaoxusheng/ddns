@@ -169,7 +169,7 @@ func SendEmail(v6, v4 string) {
 	err := e.SendWithStartTLS("smtp.qq.com:587", smtp.PlainAuth("", aliyun.Username, aliyun.Password, "smtp.qq.com"), &tls.Config{InsecureSkipVerify: true, ServerName: "smtp.gmail.com:465"})
 	if err != nil {
 		log.Println("stmp:", err)
-
+		return
 	}
 	log.Println("发送成功！")
 }
@@ -232,11 +232,6 @@ func timing() {
 // */
 
 func main() {
-	defer func() {
-		if err := recover(); err != nil {
-			fmt.Println("错误捕获", err)
-		}
-	}()
 	t1 := time.Now()
 	//启动1分钟以后
 	t2 := time.Date(t1.Year(), t1.Month(), t1.Day(), t1.Hour(), t1.Minute()+1, 0, 0, t1.Location())
