@@ -132,7 +132,7 @@ func Set(v4, v6 string) bool {
 	request.Type = "AAAA"
 	request.Value = v6
 	request.RR = "@"
-	request.RecordId = "848798676399225856"
+	request.RecordId = "" //自己查
 	request.Lang = "en"
 	request.UserClientIp = v4
 	response, err := client.UpdateDomainRecord(request)
@@ -222,15 +222,6 @@ func timing() {
 	}
 	log.Println("ipv6地址没有改变")
 }
-
-/**
- * 使用AK&SK初始化账号Client
- * @param accessKeyId
- * @param accessKeySecret
- * @return Client
- * @throws Exception
-// */
-
 func main() {
 	t1 := time.Now()
 	//启动1分钟以后
