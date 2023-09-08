@@ -1,8 +1,8 @@
 # DDNS动态解析脚本
 
 ### 1.支持阿里云解析
-配置
-```txt
+配置aliyun.json
+```json
 {
   "accessKeyId": "", //阿里云accessKeyId
   "accessKeySecret": "", //阿里云accessKeySecret
@@ -18,6 +18,7 @@
 ```go
 nohup  go run ddns.go &
 ```
+
 
 ### 3.建议开机启动脚本
 ```txt
