@@ -52,7 +52,7 @@ func init() {
 		log.Println("读取配置文件错误")
 	}
 
-	err = json.Unmarshal(data[:n], aliyun)
+	err = json.Unmarshal(data[:n], &aliyun)
 	if err != nil {
 		log.Println("json错误")
 	}
@@ -84,6 +84,7 @@ func GetIpv6() string {
 	log.Println("Ipv6获取成功", t.Data.Myip)
 	return t.Data.Myip
 }
+
 func GetIpv4() (string, bool) {
 	req, err := http.NewRequest("GET", "https://v4.ip.zxinc.org/info.php?type=json", nil)
 	if err != nil {
@@ -145,7 +146,7 @@ func Set(v4, v6 string) bool {
 func SendEmail(v6, v4 string) {
 	e := email.NewEmail()
 	//发送者
-	e.From = "服务器IPV6IPV4地址<2673893724@qq.com>"
+	e.From = "服务器IPV6IPV4地址<aliyun.Username>"
 	//接收者
 	e.To = []string{aliyun.To}
 	//主题
@@ -184,7 +185,10 @@ func timing() {
 	n, err := file.Read(b)
 	if err != nil {
 		if err == io.EOF {
-			file.Write([]byte("123"))
+			_, err2 := file.Write([]byte("123"))
+			if err2 != nil {
+				log.Println("写入失败！")
+			}
 		} else {
 			log.Println("文件读取失败" + err.Error())
 			return
