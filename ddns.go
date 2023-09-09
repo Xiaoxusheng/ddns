@@ -132,7 +132,7 @@ func Set(v4, v6 string) bool {
 	request.Type = "AAAA"
 	request.Value = v6
 	request.RR = "@"
-	request.RecordId = "" //自己查
+	request.RecordId = "控制台查看"
 	request.Lang = "en"
 	request.UserClientIp = v4
 	response, err := client.UpdateDomainRecord(request)
@@ -163,7 +163,7 @@ func SendEmail(v6, v4 string) {
 		" <span class=\"ipv6\">" + v6 + "</span>\n       " +
 		" </div>\n        \n        <div class=\"address\">\n           " +
 		" <span class=\"label\">IPv4:</span>\n          " +
-		"  <span class=\"ipv4\">" + v4 + "1</span>\n      " +
+		"  <span class=\"ipv4\">" + v4 + "</span>\n      " +
 		"  </div>\n    </div>\n</body>\n</html> ")
 
 	err := e.SendWithStartTLS("smtp.qq.com:587", smtp.PlainAuth("", aliyun.Username, aliyun.Password, "smtp.qq.com"), &tls.Config{InsecureSkipVerify: true, ServerName: "smtp.gmail.com:465"})
