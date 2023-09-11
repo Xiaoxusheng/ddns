@@ -100,7 +100,6 @@ func GetIpv4() (string, bool) {
 	if err != nil {
 		log.Println("读取失败" + err.Error())
 		return "", false
-
 	}
 	v := new(T)
 	err = json.Unmarshal(res, v)
@@ -132,7 +131,7 @@ func Set(v4, v6 string) bool {
 	request.Type = "AAAA"
 	request.Value = v6
 	request.RR = "@"
-	request.RecordId = "控制台查看"
+	request.RecordId = "" //自己查询
 	request.Lang = "en"
 	request.UserClientIp = v4
 	response, err := client.UpdateDomainRecord(request)
@@ -146,7 +145,7 @@ func Set(v4, v6 string) bool {
 func SendEmail(v6, v4 string) {
 	e := email.NewEmail()
 	//发送者
-	e.From = "服务器IPV6IPV4地址<aliyun.Username>"
+	e.From = "服务器IPV6IPV4地址<" + aliyun.Username + ">"
 	//接收者
 	e.To = []string{aliyun.To}
 	//主题
@@ -175,6 +174,7 @@ func SendEmail(v6, v4 string) {
 }
 
 func timing() {
+
 	file, err := os.OpenFile("ip.txt", os.O_CREATE|os.O_RDWR, 0755)
 	if err != nil {
 		log.Println("打开失败！" + err.Error())
@@ -223,6 +223,12 @@ func timing() {
 	log.Println("ipv6地址没有改变")
 }
 func main() {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println(err)
+		}
+	}()
+
 	t1 := time.Now()
 	//启动1分钟以后
 	t2 := time.Date(t1.Year(), t1.Month(), t1.Day(), t1.Hour(), t1.Minute()+1, 0, 0, t1.Location())
