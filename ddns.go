@@ -58,8 +58,7 @@ func init() {
 	}
 }
 
-func GetIpv6() string {
-
+func GetIpv6() (string, bool) {
 	req, err := http.NewRequest("GET", "https://v6.ip.zxinc.org/info.php?type=json", nil)
 	if err != nil {
 		log.Println(err)
@@ -69,20 +68,23 @@ func GetIpv6() string {
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Println(err)
+		return "", false
 	}
 	defer resp.Body.Close()
 	res, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Println(err)
+		return "", false
 
 	}
 	t := new(T)
 	err = json.Unmarshal(res, t)
 	if err != nil {
 		log.Println("json解析错误")
+		return "", false
 	}
 	log.Println("Ipv6获取成功", t.Data.Myip)
-	return t.Data.Myip
+	return t.Data.Myip, true
 }
 
 func GetIpv4() (string, bool) {
@@ -131,7 +133,7 @@ func Set(v4, v6 string) bool {
 	request.Type = "AAAA"
 	request.Value = v6
 	request.RR = "@"
-	request.RecordId = "" //自己查询
+	request.RecordId = "自己的第一次设置是响应数据中的RecordId"
 	request.Lang = "en"
 	request.UserClientIp = v4
 	response, err := client.UpdateDomainRecord(request)
@@ -196,28 +198,21 @@ func timing() {
 	}
 	file.Close()
 
-	v6 := GetIpv6()
+	v6, k := GetIpv6()
 	v4, ok := GetIpv4()
 	SendEmail(v6, v4)
 	fmt.Println(string(b[:n]) == v6, string(b[:n]), v6)
+	if !k || !ok {
+		log.Println("ipv6或ipv4地址获取失败")
+		return
+	}
 	if string(b[:n]) != v6 {
-		file, err := os.OpenFile("ip.txt", os.O_WRONLY, 0755)
-		_, err = file.Write([]byte(v6))
-		if err != nil {
-			log.Println("文件写入失败", err)
+		f := Set(v4, v6)
+		if f {
+			log.Println("设置成功")
 			return
 		}
-		file.Close()
-		if ok {
-			f := Set(v4, v6)
-			if f {
-				log.Println("设置成功")
-				return
-			}
-			fmt.Println("设置失败！" + err.Error())
-			return
-		}
-		log.Println("获取ipv4失败")
+		fmt.Println("设置失败！")
 		return
 	}
 	log.Println("ipv6地址没有改变")
@@ -245,6 +240,7 @@ func main() {
 			//一天以后执行
 			t2 = time.Date(t1.Year(), t1.Month(), t1.Day()+1, t1.Hour(), t1.Minute(), 0, 0, t1.Location())
 			t3 = time.NewTimer(t2.Sub(t1))
+			log.Println("任务启动," + t2.Sub(t1).String() + "后开始执行")
 		}
 	}
 }
