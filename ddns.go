@@ -70,17 +70,24 @@ func GetIpv6() (string, bool) {
 		log.Println(err)
 		return "", false
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Println(err)
+		}
+	}(resp.Body)
 	res, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Println(err)
 		return "", false
-
 	}
 	t := new(T)
 	err = json.Unmarshal(res, t)
 	if err != nil {
 		log.Println("json解析错误")
+		return "", false
+	}
+	if t.Data.Myip == "" {
 		return "", false
 	}
 	log.Println("Ipv6获取成功", t.Data.Myip)
@@ -133,12 +140,12 @@ func Set(v4, v6 string) bool {
 	request.Type = "AAAA"
 	request.Value = v6
 	request.RR = "@"
-	request.RecordId = "自己的第一次设置是响应数据中的RecordId"
+	request.RecordId = "848798676399225856"
 	request.Lang = "en"
 	request.UserClientIp = v4
 	response, err := client.UpdateDomainRecord(request)
 	if err != nil {
-		fmt.Print(err.Error())
+		log.Println(err.Error())
 	}
 	fmt.Printf("response is %#v\n", response)
 	return response.IsSuccess()
@@ -176,7 +183,11 @@ func SendEmail(v6, v4 string) {
 }
 
 func timing() {
-
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println(err)
+		}
+	}()
 	file, err := os.OpenFile("ip.txt", os.O_CREATE|os.O_RDWR, 0755)
 	if err != nil {
 		log.Println("打开失败！" + err.Error())
@@ -200,13 +211,19 @@ func timing() {
 
 	v6, k := GetIpv6()
 	v4, ok := GetIpv4()
-	SendEmail(v6, v4)
 	fmt.Println(string(b[:n]) == v6, string(b[:n]), v6)
 	if !k || !ok {
+		v6, k = GetIpv6()
 		log.Println("ipv6或ipv4地址获取失败")
-		return
 	}
+	SendEmail(v6, v4)
 	if string(b[:n]) != v6 {
+		file, err := os.OpenFile("ip.txt", os.O_WRONLY, 0755)
+		_, err = file.Write([]byte(v6))
+		if err != nil {
+			log.Println("文件写入失败", err)
+		}
+		file.Close()
 		f := Set(v4, v6)
 		if f {
 			log.Println("设置成功")
@@ -217,12 +234,8 @@ func timing() {
 	}
 	log.Println("ipv6地址没有改变")
 }
+
 func main() {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Println(err)
-		}
-	}()
 
 	t1 := time.Now()
 	//启动1分钟以后
@@ -238,7 +251,7 @@ func main() {
 			go timing()
 			t1 = time.Now()
 			//一天以后执行
-			t2 = time.Date(t1.Year(), t1.Month(), t1.Day()+1, t1.Hour(), t1.Minute(), 0, 0, t1.Location())
+			t2 = time.Date(t1.Year(), t1.Month(), t1.Day(), t1.Hour()+6, t1.Minute(), 0, 0, t1.Location())
 			t3 = time.NewTimer(t2.Sub(t1))
 			log.Println("任务启动," + t2.Sub(t1).String() + "后开始执行")
 		}
