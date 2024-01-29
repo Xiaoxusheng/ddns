@@ -10,6 +10,7 @@ import (
 	"github.com/jordan-wright/email"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"os"
@@ -71,7 +72,7 @@ func GetIpv6() (string, bool) {
 		return "", false
 	}
 	defer func(Body io.ReadCloser) {
-		err := Body.Close()
+		err = Body.Close()
 		if err != nil {
 			log.Println(err)
 		}
@@ -92,6 +93,42 @@ func GetIpv6() (string, bool) {
 	}
 	log.Println("Ipv6获取成功", t.Data.Myip)
 	return t.Data.Myip, true
+}
+
+func GetIpv6Local() (string, bool) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		fmt.Println("获取网络接口错误:", err)
+		return "", false
+	}
+	ip := ""
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			fmt.Println("获取接口地址错误:", err)
+			continue
+		}
+
+		for i, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if !ok || ipnet.IP.IsLoopback() {
+				continue
+			}
+
+			if ipnet.IP.To4() == nil && ipnet.IP.IsGlobalUnicast() {
+				fmt.Println("IPv6 公网地址:", i, ipnet.IP.String())
+				if len(ip) < len(ipnet.IP.String()) {
+					ip = ipnet.IP.String()
+				}
+				//return ipnet.IP.String(), true
+			}
+		}
+	}
+	if ip == "" {
+		fmt.Println("没有找到 IPv6 公网地址。")
+		return ip, false
+	}
+	return ip, true
 }
 
 func GetIpv4() (string, bool) {
@@ -213,12 +250,15 @@ func timing() {
 	v4, ok := GetIpv4()
 	fmt.Println(string(b[:n]) == v6, string(b[:n]), v6)
 	if !k || !ok {
-		v6, k = GetIpv6()
-		log.Println("ipv6或ipv4地址获取失败")
+		v6, k = GetIpv6Local()
+		if !k {
+			log.Println("ipv6或ipv4地址获取失败")
+		}
+		log.Println("第二次获取", v6)
 	}
 	SendEmail(v6, v4)
 	if string(b[:n]) != v6 {
-		file, err := os.OpenFile("ip.txt", os.O_WRONLY, 0755)
+		file, err = os.OpenFile("ip.txt", os.O_WRONLY, 0755)
 		_, err = file.Write([]byte(v6))
 		if err != nil {
 			log.Println("文件写入失败", err)
@@ -229,7 +269,7 @@ func timing() {
 			log.Println("设置成功")
 			return
 		}
-		fmt.Println("设置失败！")
+		log.Println("设置失败！")
 		return
 	}
 	log.Println("ipv6地址没有改变")
