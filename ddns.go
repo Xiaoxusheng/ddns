@@ -38,6 +38,12 @@ type Aliyun struct {
 	To              string `json:"to"`
 }
 
+type Respnone struct {
+	Ip   string `json:"ip"`
+	Code int32  `json:"code"`
+	Msg  string `json:"msg"`
+}
+
 var aliyun = Aliyun{}
 
 //此脚本用来动态解析dns,每天请求一次,记录ipv6地址,当发现ipv6变化时候,主动修改阿里云dns解析
@@ -47,13 +53,8 @@ func init() {
 	if err != nil {
 		log.Println(err)
 	}
-	data := make([]byte, 512)
-	n, err := file.Read(data)
-	if err != nil {
-		log.Println("读取配置文件错误")
-	}
 
-	err = json.Unmarshal(data[:n], &aliyun)
+	err = json.NewDecoder(file).Decode(&aliyun)
 	if err != nil {
 		log.Println("json错误")
 	}
@@ -64,8 +65,10 @@ func GetIpv6() (string, bool) {
 	if err != nil {
 		log.Println(err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.62")
-	client := &http.Client{}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Println(err)
@@ -119,8 +122,8 @@ func GetIpv6Local() (string, bool) {
 				fmt.Println("IPv6 公网地址:", i, ipnet.IP.String())
 				if len(ip) < len(ipnet.IP.String()) {
 					ip = ipnet.IP.String()
+					fmt.Println(len(ip), ip)
 				}
-				//return ipnet.IP.String(), true
 			}
 		}
 	}
@@ -137,7 +140,7 @@ func GetIpv4() (string, bool) {
 		log.Println(err)
 		return "", false
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.62")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -211,7 +214,7 @@ func SendEmail(v6, v4 string) {
 		"  <span class=\"ipv4\">" + v4 + "</span>\n      " +
 		"  </div>\n    </div>\n</body>\n</html> ")
 
-	err := e.SendWithStartTLS("smtp.qq.com:587", smtp.PlainAuth("", aliyun.Username, aliyun.Password, "smtp.qq.com"), &tls.Config{InsecureSkipVerify: true, ServerName: "smtp.gmail.com:465"})
+	err := e.SendWithStartTLS("smtp.qq.com:587", smtp.PlainAuth("", aliyun.Username, aliyun.Password, "smtp.qq.com"), &tls.Config{InsecureSkipVerify: true, ServerName: "smtp.qq.com"})
 	if err != nil {
 		log.Println("stmp:", err)
 		return
@@ -253,6 +256,7 @@ func timing() {
 		v6, k = GetIpv6Local()
 		if !k {
 			log.Println("ipv6或ipv4地址获取失败")
+			return
 		}
 		log.Println("第二次获取", v6)
 	}
