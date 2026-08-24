@@ -4,457 +4,833 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"github.com/aliyun/alibaba-cloud-sdk-go/sdk"
-	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth/credentials"
-	"github.com/aliyun/alibaba-cloud-sdk-go/services/alidns"
-	"github.com/jordan-wright/email"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/smtp"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk"
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth/credentials"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/alidns"
+	"github.com/jordan-wright/email"
 )
 
-type T struct {
+type Config struct {
+	Aliyun struct {
+		AccessKeyID     string `json:"access_key_id"`
+		AccessKeySecret string `json:"access_key_secret"`
+		RegionID        string `json:"region_id"`
+		RecordID        string `json:"record_id"`
+		RR              string `json:"rr"`
+		Type            string `json:"type"`
+	} `json:"aliyun"`
+
+	Email struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		To       string `json:"to"`
+		SMTPHost string `json:"smtp_host"`
+		SMTPPort int    `json:"smtp_port"`
+	} `json:"email"`
+
+	DDNS struct {
+		IntervalHours         int    `json:"interval_hours"`
+		IPFile                string `json:"ip_file"`
+		IPv6API               string `json:"ipv6_api"`
+		IPv4API               string `json:"ipv4_api"`
+		RequestTimeoutSeconds int    `json:"request_timeout_seconds"`
+	} `json:"ddns"`
+
+	Log struct {
+		Directory string `json:"directory"`
+		Level     string `json:"level"`
+	} `json:"log"`
+}
+
+type IPResponse struct {
 	Code int `json:"code"`
+
 	Data struct {
-		Myip     string `json:"myip"`
-		Location string `json:"location"`
-		Country  string `json:"country"`
-		Local    string `json:"local"`
-		Ver4     string `json:"ver4"`
-		Ver6     string `json:"ver6"`
-		Count4   int    `json:"count4"`
-		Count6   int    `json:"count6"`
+		MyIP string `json:"myip"`
+		Ver4 string `json:"ver4"`
+		Ver6 string `json:"ver6"`
 	} `json:"data"`
 }
-type Aliyun struct {
-	AccessKeyId     string `json:"accessKeyId"`
-	AccessKeySecret string `json:"accessKeySecret"`
-	Username        string `json:"username"`
-	Password        string `json:"password"`
-	To              string `json:"to"`
+
+var (
+	config Config
+
+	logger  *log.Logger
+	logFile *os.File
+
+	httpClient *http.Client
+
+	logMutex sync.Mutex
+)
+
+func loadConfig() error {
+	data, err := os.ReadFile("config.json")
+	if err != nil {
+		return fmt.Errorf("读取 config.json 失败: %w", err)
+	}
+
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("解析 config.json 失败: %w", err)
+	}
+
+	// 默认值
+	if config.DDNS.IntervalHours <= 0 {
+		config.DDNS.IntervalHours = 6
+	}
+
+	if config.DDNS.RequestTimeoutSeconds <= 0 {
+		config.DDNS.RequestTimeoutSeconds = 10
+	}
+
+	if config.DDNS.IPFile == "" {
+		config.DDNS.IPFile = "ip.txt"
+	}
+
+	if config.DDNS.IPv6API == "" {
+		config.DDNS.IPv6API = "https://v6.ip.zxinc.org/info.php?type=json"
+	}
+
+	if config.DDNS.IPv4API == "" {
+		config.DDNS.IPv4API = "https://v4.ip.zxinc.org/info.php?type=json"
+	}
+
+	if config.Log.Directory == "" {
+		config.Log.Directory = "logs"
+	}
+
+	if config.Email.SMTPHost == "" {
+		config.Email.SMTPHost = "smtp.qq.com"
+	}
+
+	if config.Email.SMTPPort <= 0 {
+		config.Email.SMTPPort = 587
+	}
+
+	if config.Aliyun.RegionID == "" {
+		config.Aliyun.RegionID = "cn-hangzhou"
+	}
+
+	if config.Aliyun.Type == "" {
+		config.Aliyun.Type = "AAAA"
+	}
+
+	if config.Aliyun.RR == "" {
+		config.Aliyun.RR = "@"
+	}
+
+	return nil
 }
 
-type Respnone struct {
-	Ip   string `json:"ip"`
-	Code int32  `json:"code"`
-	Msg  string `json:"msg"`
+func initLogger() error {
+	logMutex.Lock()
+	defer logMutex.Unlock()
+
+	if err := os.MkdirAll(config.Log.Directory, 0755); err != nil {
+		return fmt.Errorf("创建日志目录失败: %w", err)
+	}
+
+	fileName := fmt.Sprintf(
+		"%s/ddns_%s.log",
+		config.Log.Directory,
+		time.Now().Format("20060102"),
+	)
+
+	var err error
+
+	logFile, err = os.OpenFile(
+		fileName,
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+		0644,
+	)
+	if err != nil {
+		return fmt.Errorf("打开日志文件失败: %w", err)
+	}
+
+	writer := io.MultiWriter(os.Stdout, logFile)
+
+	logger = log.New(
+		writer,
+		"",
+		log.LstdFlags|log.Lshortfile,
+	)
+
+	logger.Println("日志系统初始化完成")
+
+	return nil
 }
 
-var aliyun = Aliyun{}
-
-// init 初始化函数，在程序启动时自动执行，用于读取 aliyun.json 配置文件并解析到全局变量 aliyun 中。
-func init() {
-	file, err := os.OpenFile("aliyun.json", os.O_RDONLY, 0644)
-	if err != nil {
-		log.Println(err)
-	}
-
-	err = json.NewDecoder(file).Decode(&aliyun)
-	if err != nil {
-		log.Println("json错误")
+func initHTTPClient() {
+	httpClient = &http.Client{
+		Timeout: time.Duration(config.DDNS.RequestTimeoutSeconds) * time.Second,
 	}
 }
 
-// GetIpv6 通过访问外部 API 获取本机的 IPv6 地址。
-// 注意：此方法可能会获取到用于出站的"临时隐私 IPv6 地址"，导致外部无法主动访问进来。作为备用方案保留。
-func GetIpv6() (string, bool) {
-	req, err := http.NewRequest("GET", "https://v6.ip.zxinc.org/info.php?type=json", nil)
+/*
+通过公网API获取IP
+*/
+func getIPFromAPI(apiURL string) (string, bool) {
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
-		log.Println(err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-	client := &http.Client{
-		Timeout: time.Second * 10,
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Println(err)
+		logger.Printf("创建IP API请求失败: %v", err)
 		return "", false
 	}
-	defer func(Body io.ReadCloser) {
-		err = Body.Close()
-		if err != nil {
-			log.Println(err)
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Go-DDNS/1.0")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		logger.Printf("IP API请求失败: %v", err)
+		return "", false
+	}
+
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Printf("IP API HTTP状态码: %d", resp.StatusCode)
+		return "", false
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logger.Printf("读取IP API响应失败: %v", err)
+		return "", false
+	}
+
+	var result IPResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		logger.Printf("解析IP API响应失败: %v", err)
+		return "", false
+	}
+
+	if result.Data.MyIP == "" {
+		return "", false
+	}
+
+	return strings.TrimSpace(result.Data.MyIP), true
+}
+
+/*
+IPv6总入口
+
+第一优先级：
+公网API
+
+第二优先级：
+本地网卡
+*/
+func GetIPv6() (string, bool) {
+	logger.Println("========== 开始获取IPv6 ==========")
+
+	// =====================================================
+	// 第一优先级：公网API
+	// =====================================================
+
+	logger.Println("第一方式：通过公网IPv6 API获取")
+
+	ip, ok := getIPFromAPI(config.DDNS.IPv6API)
+	if ok {
+		parsedIP := net.ParseIP(ip)
+		if isUsableGlobalIPv6(parsedIP) {
+			logger.Printf("公网API获取IPv6成功: %s", ip)
+			return ip, true
 		}
-	}(resp.Body)
-	res, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Println(err)
-		return "", false
+
+		logger.Printf("公网API返回的地址不是有效公网IPv6: %s", ip)
+	} else {
+		logger.Println("公网IPv6 API获取失败")
 	}
-	t := new(T)
-	err = json.Unmarshal(res, t)
-	if err != nil {
-		log.Println("json解析错误")
-		return "", false
+
+	// =====================================================
+	// 第二优先级：本地网卡
+	// =====================================================
+
+	logger.Println("第二方式：扫描本地网络接口获取IPv6")
+
+	ip, ok = GetIPv6Local()
+	if ok {
+		logger.Printf("本地网卡IPv6获取成功: %s", ip)
+		return ip, true
 	}
-	if t.Data.Myip == "" {
-		return "", false
-	}
-	log.Println("外部API Ipv6获取成功", t.Data.Myip)
-	return t.Data.Myip, true
+
+	logger.Println("本地网卡没有找到可用公网IPv6")
+	logger.Println("========== IPv6获取失败 ==========")
+
+	return "", false
 }
 
-// isTemporaryIPv6 判断一个 IPv6 地址是否是临时隐私地址。
-// 临时地址通常由随机生成的后64位组成，而 EUI-64 固定地址的后64位中第7位(ff:fe字节对)是固定的。
-// 但最可靠的方式还是通过 `ip` 命令的 "temporary" 标记，这里作为额外的启发式补充。
-// 规则：如果 IPv6 地址不含 "ff:fe"（EUI-64格式），则它更可能是临时地址，优先级低。
-func isLikelyStableIPv6(ip net.IP) bool {
-	// EUI-64 派生的固定 IPv6 地址，其接口标识符（后64位）中固定含有 ff:fe 字节对
-	// 例如：2001:db8::a1b2:ff:fe03:c4d5
-	s := ip.String()
-	return strings.Contains(s, "ff:fe") || strings.Contains(s, "FF:FE")
-}
-
-// GetIpv6Local 遍历本地网卡，自动寻找处于"已连接"状态的物理网卡，并提取其全局公网 IPv6 地址。
-// 修复：Linux 下优先通过 `ip` 命令精确过滤 temporary/deprecated 地址；
-// 降级模式下增加 EUI-64 启发式过滤，避免返回临时隐私地址。
-func GetIpv6Local() (string, bool) {
+/*
+从本地网络接口获取IPv6
+*/
+func GetIPv6Local() (string, bool) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		fmt.Println("获取网络接口错误:", err)
+		logger.Printf("获取网络接口失败: %v", err)
 		return "", false
 	}
 
 	for _, iface := range interfaces {
-		// 1. 过滤状态：网卡必须是 Up（已启用）并且 Running（插着网线且有信号）
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagRunning == 0 {
+		/*
+		   网卡必须是 UP
+		*/
+		if iface.Flags&net.FlagUp == 0 {
 			continue
 		}
 
-		// 2. 过滤类型：排除 Loopback (本地回环) 接口
+		/*
+		   排除回环接口
+		*/
 		if iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
 
-		// 3. 过滤虚拟网卡：按前缀排除 docker、网桥(br-)、虚拟以太网(veth)等，确保定位到物理网卡
-		ifName := strings.ToLower(iface.Name)
-		if strings.HasPrefix(ifName, "docker") || strings.HasPrefix(ifName, "br-") ||
-			strings.HasPrefix(ifName, "veth") || strings.HasPrefix(ifName, "tailscale") ||
-			strings.HasPrefix(ifName, "tun") || strings.HasPrefix(ifName, "tap") {
-			continue
-		}
-
-		// 针对 Linux 系统：通过 `ip` 命令精确过滤 temporary/deprecated 地址
-		if runtime.GOOS == "linux" {
-			out, cmdErr := exec.Command("ip", "-6", "-o", "addr", "show", "dev", iface.Name, "scope", "global").Output()
-			if cmdErr == nil {
-				lines := strings.Split(string(out), "\n")
-				for _, line := range lines {
-					// 跳过临时或将废弃的地址
-					if strings.Contains(line, "temporary") || strings.Contains(line, "deprecated") {
-						continue
-					}
-					if strings.Contains(line, "inet6") {
-						parts := strings.Fields(line)
-						for i, part := range parts {
-							if part == "inet6" && i+1 < len(parts) {
-								ipWithMask := parts[i+1]
-								ipStr := strings.Split(ipWithMask, "/")[0]
-								if parsedIP := net.ParseIP(ipStr); parsedIP != nil && !parsedIP.IsPrivate() && parsedIP.IsGlobalUnicast() {
-									fmt.Printf("在活动物理网卡 %s 通过 ip 命令精准锁定固定 IPv6 地址: %s\n", iface.Name, ipStr)
-									return ipStr, true
-								}
-							}
-						}
-					}
-				}
-				// ip 命令执行成功但没找到合适地址，继续下一张网卡（不降级到标准库）
-				fmt.Printf("网卡 %s: ip 命令执行成功但未找到非临时公网 IPv6\n", iface.Name)
-				continue
-			}
-			// ip 命令执行失败（可能是权限问题），才降级到标准库
-			fmt.Printf("网卡 %s: ip 命令执行失败(%v)，降级到标准库\n", iface.Name, cmdErr)
-		}
-
-		// 降级方案：Go 标准库遍历（Windows/Mac 或 ip 命令失败时使用）
-		// 修复：增加 EUI-64 启发式判断，优先返回含 ff:fe 的固定地址
 		addrs, err := iface.Addrs()
 		if err != nil {
-			fmt.Println("获取接口地址错误:", err)
+			logger.Printf("读取网卡 %s 地址失败: %v", iface.Name, err)
 			continue
 		}
 
-		var stableIP string   // 含 ff:fe 的 EUI-64 固定地址（首选）
-		var fallbackIP string // 普通公网 IPv6（备用）
-
 		for _, addr := range addrs {
-			ipnet, ok := addr.(*net.IPNet)
-			if !ok {
+			ip := extractIP(addr)
+			if ip == nil {
 				continue
 			}
-			if ipnet.IP.To4() != nil || !ipnet.IP.IsGlobalUnicast() || ipnet.IP.IsPrivate() {
-				continue
-			}
-			if stableIP == "" && isLikelyStableIPv6(ipnet.IP) {
-				stableIP = ipnet.IP.String()
-				fmt.Printf("在活动物理网卡 %s 找到疑似固定 IPv6 (EUI-64): %s\n", iface.Name, stableIP)
-			} else if fallbackIP == "" {
-				fallbackIP = ipnet.IP.String()
-				fmt.Printf("在活动物理网卡 %s 找到公网 IPv6 (备用): %s\n", iface.Name, fallbackIP)
-			}
-		}
 
-		if stableIP != "" {
-			return stableIP, true
-		}
-		if fallbackIP != "" {
-			return fallbackIP, true
+			/*
+			   必须是公网IPv6
+			*/
+			if !isUsableGlobalIPv6(ip) {
+				continue
+			}
+
+			logger.Printf("发现本地公网IPv6 [%s]: %s", iface.Name, ip.String())
+
+			return ip.String(), true
 		}
 	}
 
-	fmt.Println("本地活动物理网卡没有找到 IPv6 公网地址。")
 	return "", false
 }
 
-// GetIpv4 通过访问外部 API 获取本机的 IPv4 地址。
-func GetIpv4() (string, bool) {
-	req, err := http.NewRequest("GET", "https://v4.ip.zxinc.org/info.php?type=json", nil)
-	if err != nil {
-		log.Println(err)
-		return "", false
+/*
+从 net.Addr 中提取 IP
+*/
+func extractIP(addr net.Addr) net.IP {
+	switch v := addr.(type) {
+	case *net.IPNet:
+		return v.IP
+	case *net.IPAddr:
+		return v.IP
+	default:
+		return nil
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Println("请求失败" + err.Error())
-		return "", false
-	}
-	defer resp.Body.Close()
-	res, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Println("读取失败" + err.Error())
-		return "", false
-	}
-	v := new(T)
-	err = json.Unmarshal(res, v)
-	if err != nil {
-		log.Println("json解析错误")
-		return "", false
-	}
-	log.Println("ipv4获取成功", v.Data.Myip)
-	return v.Data.Myip, true
 }
 
-// Set 调用阿里云 SDK 更新 DNS 解析记录，如果更新失败且非"记录已存在"错误，则发送商务告警邮件。
-func Set(v4, v6 string) bool {
-	config := sdk.NewConfig()
+/*
+判断是否为真正可用的公网IPv6
+*/
+func isUsableGlobalIPv6(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
 
-	credential := credentials.NewAccessKeyCredential(aliyun.AccessKeyId, aliyun.AccessKeySecret)
-	client, err := alidns.NewClientWithOptions("cn-hangzhou", config, credential)
+	/*
+	   IPv4地址排除
+	*/
+	if ip.To4() != nil {
+		return false
+	}
+
+	/*
+	   ::
+	*/
+	if ip.IsUnspecified() {
+		return false
+	}
+
+	/*
+	   ::1
+	*/
+	if ip.IsLoopback() {
+		return false
+	}
+
+	/*
+	   fe80::/10
+	*/
+	if ip.IsLinkLocalUnicast() {
+		return false
+	}
+
+	/*
+	   ff00::/8
+	*/
+	if ip.IsMulticast() {
+		return false
+	}
+
+	/*
+	   必须是 Global Unicast
+	*/
+	if !ip.IsGlobalUnicast() {
+		return false
+	}
+
+	return true
+}
+
+/*
+获取IPv4
+*/
+func GetIPv4() (string, bool) {
+	logger.Println("开始获取IPv4")
+
+	ip, ok := getIPFromAPI(config.DDNS.IPv4API)
+	if !ok {
+		logger.Println("IPv4获取失败")
+		return "", false
+	}
+
+	logger.Printf("IPv4获取成功: %s", ip)
+
+	return ip, true
+}
+
+/*
+读取上一次IPv6
+*/
+func readOldIP() string {
+	data, err := os.ReadFile(config.DDNS.IPFile)
 	if err != nil {
-		log.Println(err)
+		if !os.IsNotExist(err) {
+			logger.Printf("读取 %s 失败: %v", config.DDNS.IPFile, err)
+		}
+		return ""
+	}
+
+	return strings.TrimSpace(string(data))
+}
+
+/*
+保存IPv6
+*/
+func saveIP(ip string) error {
+	return os.WriteFile(config.DDNS.IPFile, []byte(ip+"\n"), 0644)
+}
+
+/*
+更新阿里云DNS
+*/
+func UpdateDNS(v4 string, v6 string) bool {
+	logger.Println("========== 开始更新阿里云DNS ==========")
+
+	credential := credentials.NewAccessKeyCredential(
+		config.Aliyun.AccessKeyID,
+		config.Aliyun.AccessKeySecret,
+	)
+
+	client, err := alidns.NewClientWithOptions(
+		config.Aliyun.RegionID,
+		sdk.NewConfig(),
+		credential,
+	)
+	if err != nil {
+		logger.Printf("创建阿里云客户端失败: %v", err)
+		return false
 	}
 
 	request := alidns.CreateUpdateDomainRecordRequest()
 
 	request.Scheme = "https"
-	request.Type = "AAAA"
+	request.RecordId = config.Aliyun.RecordID
+	request.RR = config.Aliyun.RR
+	request.Type = config.Aliyun.Type
 	request.Value = v6
-	request.RR = "@"
-	request.RecordId = "1953630840458695680"
-	request.Lang = "en"
-	request.UserClientIp = v4
+
+	/*
+	   阿里云这里可以使用IPv4。
+	   如果IPv4获取不到，就不设置。
+	*/
+	if v4 != "" {
+		request.UserClientIp = v4
+	}
+
+	logger.Printf(
+		"DNS参数: RecordID=%s RR=%s Type=%s IPv6=%s",
+		config.Aliyun.RecordID,
+		config.Aliyun.RR,
+		config.Aliyun.Type,
+		v6,
+	)
+
 	response, err := client.UpdateDomainRecord(request)
 	if err != nil {
-		log.Println(err.Error())
+		logger.Printf("阿里云DNS更新失败: %v", err)
+		return false
 	}
-	fmt.Printf("response is %#v\n", response.String())
 
-	// 如果失败，发送 email 告警
-	if !response.IsSuccess() && !strings.Contains(response.GetHttpContentString(), "The DNS record already exists.") {
-		e := email.NewEmail()
-		e.From = "DNS系统服务 <" + aliyun.Username + ">"
-		e.To = []string{aliyun.To}
-		e.Subject = "【系统告警】DNS解析更新异常通知"
-		e.HTML = []byte(`<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>DNS解析异常告警</title>
-    <style>
-        body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px; color: #333333; }
-        .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e0e0e0; border-top: 4px solid #d9534f; border-radius: 4px; overflow: hidden;}
-        .header { padding: 20px 30px; border-bottom: 1px solid #eeeeee; background-color: #fafafa; }
-        .header h2 { margin: 0; color: #d9534f; font-size: 18px; font-weight: 600;}
-        .content { padding: 30px; line-height: 1.6; font-size: 14px;}
-        .error-box { background-color: #fdf7f7; border: 1px solid #eed3d7; padding: 15px; color: #b94a48; border-radius: 4px; font-family: 'Courier New', Courier, monospace; word-wrap: break-word; font-size: 13px; margin: 20px 0;}
-        .footer { padding: 20px 30px; background-color: #f9f9f9; color: #999999; font-size: 12px; text-align: center; border-top: 1px solid #eeeeee; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header"><h2>系统告警：DNS解析异常</h2></div>
-        <div class="content">
-            <p>尊敬的管理员，您好：</p>
-            <p>DDNS 自动更新服务在执行过程中遇到错误，未能成功更新阿里云 DNS 记录。具体错误信息如下：</p>
-            <div class="error-box">` + response.GetHttpContentString() + `</div>
-            <p>请及时登录云控制台排查原因并处理。</p>
-        </div>
-        <div class="footer">此邮件由 DDNS 服务自动生成并发送，请勿直接回复。</div>
-    </div>
-</body>
-</html>`)
-		err := e.SendWithStartTLS("smtp.qq.com:587", smtp.PlainAuth("", aliyun.Username, aliyun.Password, "smtp.qq.com"), &tls.Config{InsecureSkipVerify: true, ServerName: "smtp.qq.com"})
-		if err != nil {
-			log.Println("stmp:", err)
-		}
-		log.Println("告警邮件发送成功！")
-		log.Println("响应内容", response.GetHttpContentString())
+	content := response.GetHttpContentString()
+	logger.Printf("阿里云返回: %s", content)
+
+	if response.IsSuccess() {
+		logger.Println("阿里云DNS更新成功")
+		return true
 	}
-	return response.IsSuccess()
+
+	/*
+	   如果已经是这个记录，认为成功。
+	*/
+	if strings.Contains(content, "The DNS record already exists.") {
+		logger.Println("DNS记录已经存在")
+		return true
+	}
+
+	logger.Println("阿里云DNS更新失败")
+
+	return false
 }
 
-// SendEmail 发送包含当前 IPv6 和 IPv4 地址的商务风格通知邮件。
-func SendEmail(v6, v4 string) {
-	e := email.NewEmail()
-	e.From = "服务器网络监控 <" + aliyun.Username + ">"
-	e.To = []string{aliyun.To}
-	e.Subject = "【系统报告】服务器公网 IP 地址变更通知"
-	e.HTML = []byte(`<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>服务器 IP 地址状态报告</title>
-    <style>
-        body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px; color: #333333; }
-        .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e0e0e0; border-top: 4px solid #0052cc; border-radius: 4px; overflow: hidden;}
-        .header { padding: 20px 30px; border-bottom: 1px solid #eeeeee; background-color: #fafafa; }
-        .header h2 { margin: 0; color: #0052cc; font-size: 18px; font-weight: 600;}
-        .content { padding: 30px; line-height: 1.6; font-size: 14px;}
-        .ip-table { width: 100%; border-collapse: collapse; margin-top: 20px; margin-bottom: 20px;}
-        .ip-table th, .ip-table td { padding: 14px 15px; border: 1px solid #dddddd; text-align: left; }
-        .ip-table th { background-color: #f8f9fa; width: 30%; color: #555555; font-weight: bold; }
-        .ip-table td { font-family: 'Courier New', Courier, monospace; color: #222222; font-weight: 500;}
-        .footer { padding: 20px 30px; background-color: #f9f9f9; color: #999999; font-size: 12px; text-align: center; border-top: 1px solid #eeeeee; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header"><h2>系统报告：IP 地址变更，DNS 已更新</h2></div>
-        <div class="content">
-            <p>尊敬的管理员，您好：</p>
-            <p>检测到服务器公网 IP 地址发生变更，DNS 解析已自动同步更新，新地址如下：</p>
-            <table class="ip-table">
-                <tr><th>IPv6 地址</th><td>` + v6 + `</td></tr>
-                <tr><th>IPv4 地址</th><td>` + v4 + `</td></tr>
-            </table>
-        </div>
-        <div class="footer">此邮件由 DDNS 服务自动生成并发送，请勿直接回复。</div>
-    </div>
-</body>
-</html>`)
-
-	err := e.SendWithStartTLS("smtp.qq.com:587", smtp.PlainAuth("", aliyun.Username, aliyun.Password, "smtp.qq.com"), &tls.Config{InsecureSkipVerify: true, ServerName: "smtp.qq.com"})
-	if err != nil {
-		log.Println("stmp:", err)
+/*
+发送IP通知邮件
+*/
+func SendEmail(v6 string, v4 string) {
+	/*
+	   邮箱没有配置就跳过
+	*/
+	if config.Email.Username == "" ||
+		config.Email.Password == "" ||
+		config.Email.To == "" {
+		logger.Println("邮箱配置不完整，跳过邮件发送")
 		return
 	}
-	log.Println("变更通知邮件发送成功！")
+
+	e := email.NewEmail()
+
+	e.From = "服务器DDNS<" + config.Email.Username + ">"
+	e.To = []string{config.Email.To}
+	e.Subject = "服务器IP地址通知"
+
+	e.HTML = []byte(fmt.Sprintf(`
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+content="width=device-width,initial-scale=1">
+
+<title>DDNS IP地址通知</title>
+
+<style>
+
+body {
+    margin: 0;
+    padding: 30px;
+    background: #f5f7fa;
+    font-family:
+        Arial,
+        "Microsoft YaHei",
+        sans-serif;
 }
 
-// timing 定时任务的核心逻辑，负责获取 IP、比对本地记录文件、发送邮件并触发 DNS 更新。
-func timing() {
+.card {
+
+    max-width: 520px;
+
+    margin: 30px auto;
+
+    padding: 30px;
+
+    background: white;
+
+    border-radius: 16px;
+
+    box-shadow:
+        0 10px 30px
+        rgba(0,0,0,.08);
+}
+
+h1 {
+
+    margin-top: 0;
+
+    color: #333;
+}
+
+.label {
+
+    margin-top: 20px;
+
+    margin-bottom: 8px;
+
+    font-weight: bold;
+
+    color: #666;
+}
+
+.ip {
+
+    padding: 12px;
+
+    background: #f5f5f5;
+
+    border-radius: 8px;
+
+    font-family: monospace;
+
+    word-break: break-all;
+
+    color: #333;
+}
+
+.time {
+
+    margin-top: 20px;
+
+    color: #999;
+
+    font-size: 13px;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+<h1>DDNS IP 地址通知</h1>
+
+<div class="label">
+IPv6
+</div>
+
+<div class="ip">
+%s
+</div>
+
+<div class="label">
+IPv4
+</div>
+
+<div class="ip">
+%s
+</div>
+
+<div class="time">
+更新时间：%s
+</div>
+
+</div>
+
+</body>
+
+</html>
+`,
+		v6,
+		v4,
+		time.Now().Format("2006-01-02 15:04:05"),
+	))
+
+	addr := fmt.Sprintf(
+		"%s:%d",
+		config.Email.SMTPHost,
+		config.Email.SMTPPort,
+	)
+
+	auth := smtp.PlainAuth(
+		"",
+		config.Email.Username,
+		config.Email.Password,
+		config.Email.SMTPHost,
+	)
+
+	err := e.SendWithStartTLS(
+		addr,
+		auth,
+		&tls.Config{
+			ServerName: config.Email.SMTPHost,
+			MinVersion: tls.VersionTLS12,
+		},
+	)
+	if err != nil {
+		logger.Printf("邮件发送失败: %v", err)
+		return
+	}
+
+	logger.Println("IP通知邮件发送成功")
+}
+
+/*
+执行一次DDNS任务
+*/
+func RunOnce() {
+	logger.Println("========================================")
+	logger.Println("开始执行DDNS任务")
+	logger.Println("========================================")
+
+	/*
+	   获取IPv6
+	*/
+	v6, ok := GetIPv6()
+	if !ok {
+		logger.Println("IPv6获取失败，本次任务结束")
+		return
+	}
+
+	/*
+	   获取IPv4
+
+	   IPv4失败不会影响IPv6 DDNS。
+	*/
+	v4, _ := GetIPv4()
+
+	/*
+	   读取历史IPv6
+	*/
+	oldIP := readOldIP()
+
+	logger.Printf("历史IPv6: %s", oldIP)
+	logger.Printf("当前IPv6: %s", v6)
+
+	/*
+	   第一次运行
+	*/
+	if oldIP == "" {
+		logger.Println("第一次运行，准备更新DNS")
+
+		if !UpdateDNS(v4, v6) {
+			logger.Println("第一次DNS更新失败")
+			return
+		}
+
+		if err := saveIP(v6); err != nil {
+			logger.Printf("保存IPv6失败: %v", err)
+			return
+		}
+
+		logger.Println("第一次IPv6保存成功")
+
+		SendEmail(v6, v4)
+
+		return
+	}
+
+	/*
+	   IPv6没有变化
+	*/
+	if oldIP == v6 {
+		logger.Println("IPv6没有变化，无需更新DNS")
+		return
+	}
+
+	/*
+	   IPv6发生变化
+	*/
+	logger.Println("检测到IPv6发生变化")
+	logger.Printf("旧IPv6: %s", oldIP)
+	logger.Printf("新IPv6: %s", v6)
+
+	/*
+	   更新阿里云DNS
+	*/
+	if !UpdateDNS(v4, v6) {
+		logger.Println("DNS更新失败")
+
+		/*
+		   非常重要：
+
+		   DNS失败时不能保存新IP。
+
+		   这样下一次任务还会继续尝试。
+		*/
+
+		return
+	}
+
+	/*
+	   DNS成功以后再保存IP
+	*/
+	if err := saveIP(v6); err != nil {
+		logger.Printf("保存IPv6失败: %v", err)
+		return
+	}
+
+	logger.Println("新的IPv6已经保存")
+
+	/*
+	   发送邮件
+	*/
+	SendEmail(v6, v4)
+
+	logger.Println("DDNS任务完成")
+}
+
+func main() {
+	/*
+	   加载配置
+	*/
+	if err := loadConfig(); err != nil {
+		log.Fatal(err)
+	}
+
+	/*
+	   初始化日志
+	*/
+	if err := initLogger(); err != nil {
+		log.Fatal(err)
+	}
+
 	defer func() {
-		if err := recover(); err != nil {
-			log.Println(err)
+		if logFile != nil {
+			_ = logFile.Close()
 		}
 	}()
 
-	file, err := os.OpenFile("ip.txt", os.O_CREATE|os.O_RDWR, 0755)
-	if err != nil {
-		log.Println("打开失败！" + err.Error())
-		return
-	}
-	b := make([]byte, 1024)
-	n, err := file.Read(b)
-	if err != nil {
-		if err == io.EOF {
-			_, err2 := file.Write([]byte("123"))
-			if err2 != nil {
-				log.Println("写入失败！")
-			}
-		} else {
-			log.Println("文件读取失败" + err.Error())
-			return
-		}
-	}
-	file.Close()
+	logger.Println("========================================")
+	logger.Println("DDNS服务启动")
+	logger.Println("========================================")
 
-	// 优先从本地网卡精准获取固定 IPv6（过滤临时隐私地址）
-	v6, k := GetIpv6Local()
-	if !k {
-		log.Println("本地自动获取失败，尝试通过外部API获取备用IPv6...")
-		v6, k = GetIpv6()
-		if !k {
-			log.Println("外部API获取IPv6也失败！")
-			return
-		}
-	}
+	/*
+	   HTTP客户端只创建一次。
 
-	v4, ok := GetIpv4()
-	if !ok {
-		log.Println("IPv4获取失败，但不影响IPv6解析，继续流程...")
-	}
+	   后面IPv4 / IPv6请求重复使用。
+	*/
+	initHTTPClient()
 
-	oldIP := strings.TrimSpace(string(b[:n]))
-	log.Printf("IP对比 — 旧: %s | 新: %s | 是否变化: %v", oldIP, v6, oldIP != v6)
+	/*
+	   启动以后立即执行一次
+	*/
+	RunOnce()
 
-	// 修复：只有 IP 变化时才更新 DNS 并发送通知邮件，避免每次都发邮件
-	if oldIP != v6 {
-		log.Println("检测到 IPv6 变化，开始更新...")
+	/*
+	   定时执行
+	*/
+	interval := time.Duration(config.DDNS.IntervalHours) * time.Hour
 
-		file, err = os.OpenFile("ip.txt", os.O_WRONLY|os.O_TRUNC, 0755)
-		if err != nil {
-			log.Println("打开文件失败", err)
-			return
-		}
-		_, err = file.Write([]byte(v6))
-		if err != nil {
-			log.Println("文件写入失败", err)
-		}
-		file.Close()
+	logger.Printf("下一次任务将在 %s 后执行", interval)
 
-		f := Set(v4, v6)
-		if f {
-			log.Println("DNS 更新成功，发送通知邮件...")
-			SendEmail(v6, v4) // 修复：只在成功更新后才发邮件
-			log.Println("设置成功")
-			return
-		}
-		log.Println("设置失败！")
-		return
-	}
-	log.Println("IPv6 地址未变化，无需更新。")
-}
-
-// main 程序入口，控制定时任务的触发周期。
-func main() {
-	const interval = 30 * time.Minute
-
-	// 启动后立即执行一次
-	log.Println("程序启动，立即执行首次检测...")
-	go timing()
-	log.Printf("下次检测时间: %s", time.Now().Add(interval).Format("2006-01-02 15:04:05"))
-
-	// 之后每30分钟执行一次
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	log.Printf("定时任务已启动，每 %v 检测一次 IP 变化", interval)
 
-	for t := range ticker.C {
-		log.Println("开始执行定时检测...")
-		go timing()
-		next := t.Add(interval)
-		log.Printf("本次检测完成，下次检测时间: %s", next.Format("2006-01-02 15:04:05"))
+	for range ticker.C {
+		RunOnce()
+
+		logger.Printf("下一次任务将在 %s 后执行", interval)
 	}
 }
