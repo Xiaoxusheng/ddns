@@ -477,7 +477,9 @@ func UpdateDNS(v4 string, v6 string) bool {
 
 	response, err := client.UpdateDomainRecord(request)
 	if err != nil {
-		logger.Printf("阿里云DNS更新失败: %v", err)
+		errorMessage := fmt.Sprintf("阿里云DNS更新失败: %v", err)
+		logger.Println(errorMessage)
+		SendDNSErrorEmail(errorMessage)
 		return false
 	}
 
@@ -674,6 +676,262 @@ IPv4
 	}
 
 	logger.Println("IP通知邮件发送成功")
+}
+
+/*发送错误报警邮件*/
+func SendDNSErrorEmail(errorMessage string) {
+	if config.Email.Username == "" ||
+		config.Email.Password == "" ||
+		config.Email.To == "" {
+		logger.Println("邮箱配置不完整，跳过DNS错误邮件")
+		return
+	}
+
+	now := time.Now().Format("2006-01-02 15:04:05")
+
+	e := email.NewEmail()
+	e.From = "DDNS Monitoring <" + config.Email.Username + ">"
+	e.To = []string{config.Email.To}
+	e.Subject = "DDNS 更新失败"
+
+	e.HTML = []byte(fmt.Sprintf(`
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DDNS 更新失败</title>
+
+<style>
+body {
+	margin: 0;
+	padding: 32px 16px;
+	background: #f6f7f9;
+	font-family:
+		Arial,
+		"Microsoft YaHei",
+		"PingFang SC",
+		sans-serif;
+	color: #222;
+}
+
+.container {
+	max-width: 620px;
+	margin: 0 auto;
+}
+
+.mail {
+	background: #ffffff;
+	border: 1px solid #e1e4e8;
+	border-radius: 8px;
+	overflow: hidden;
+}
+
+.top {
+	padding: 22px 28px;
+	border-bottom: 1px solid #e8eaed;
+}
+
+.brand {
+	font-size: 15px;
+	font-weight: 600;
+	color: #202124;
+}
+
+.brand-sub {
+	margin-top: 4px;
+	font-size: 12px;
+	color: #8a8f98;
+}
+
+.notice {
+	padding: 24px 28px 20px;
+	border-bottom: 1px solid #e8eaed;
+}
+
+.notice-title {
+	font-size: 20px;
+	font-weight: 600;
+	color: #202124;
+}
+
+.notice-line {
+	width: 36px;
+	height: 3px;
+	margin-top: 10px;
+	background: #d93025;
+}
+
+.notice-text {
+	margin-top: 14px;
+	font-size: 13px;
+	line-height: 1.7;
+	color: #686d75;
+}
+
+.content {
+	padding: 24px 28px 28px;
+}
+
+.row {
+	display: table;
+	width: 100%%;
+	padding: 12px 0;
+	border-bottom: 1px solid #f0f1f2;
+}
+
+.row:last-child {
+	border-bottom: none;
+}
+
+.label {
+	display: table-cell;
+	width: 100px;
+	vertical-align: top;
+	font-size: 13px;
+	color: #7a7f87;
+}
+
+.value {
+	display: table-cell;
+	vertical-align: top;
+	font-size: 13px;
+	line-height: 1.6;
+	color: #26282c;
+	word-break: break-word;
+}
+
+.error {
+	color: #b42318;
+	font-family:
+		Consolas,
+		Monaco,
+		monospace;
+}
+
+.footer {
+	padding: 16px 28px;
+	background: #fafbfc;
+	border-top: 1px solid #e8eaed;
+	font-size: 12px;
+	line-height: 1.6;
+	color: #9aa0a6;
+}
+
+@media only screen and (max-width: 600px) {
+	body {
+		padding: 12px 8px;
+	}
+
+	.top,
+	.notice,
+	.content {
+		padding-left: 20px;
+		padding-right: 20px;
+	}
+
+	.footer {
+		padding-left: 20px;
+		padding-right: 20px;
+	}
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+	<div class="mail">
+
+		<div class="top">
+			<div class="brand">DDNS Monitoring</div>
+			<div class="brand-sub">Dynamic DNS Service</div>
+		</div>
+
+		<div class="notice">
+			<div class="notice-title">
+				DDNS 更新失败
+			</div>
+
+			<div class="notice-line"></div>
+
+			<div class="notice-text">
+				系统检测到本次动态 DNS 更新未完成。
+				以下为本次任务的失败信息。
+			</div>
+		</div>
+
+		<div class="content">
+
+			<div class="row">
+				<div class="label">状态</div>
+				<div class="value">失败</div>
+			</div>
+
+			<div class="row">
+				<div class="label">服务</div>
+				<div class="value">阿里云 DNS</div>
+			</div>
+
+			<div class="row">
+				<div class="label">失败原因</div>
+				<div class="value error">%s</div>
+			</div>
+
+			<div class="row">
+				<div class="label">失败时间</div>
+				<div class="value">%s</div>
+			</div>
+
+		</div>
+
+		<div class="footer">
+			此邮件由 DDNS Monitoring 自动发送，请勿直接回复。
+		</div>
+
+	</div>
+
+</div>
+
+</body>
+</html>
+`,
+		errorMessage,
+		now,
+	))
+
+	addr := fmt.Sprintf(
+		"%s:%d",
+		config.Email.SMTPHost,
+		config.Email.SMTPPort,
+	)
+
+	auth := smtp.PlainAuth(
+		"",
+		config.Email.Username,
+		config.Email.Password,
+		config.Email.SMTPHost,
+	)
+
+	err := e.SendWithStartTLS(
+		addr,
+		auth,
+		&tls.Config{
+			ServerName: config.Email.SMTPHost,
+			MinVersion: tls.VersionTLS12,
+		},
+	)
+
+	if err != nil {
+		logger.Printf(
+			"发送DNS错误邮件失败: %v",
+			err,
+		)
+		return
+	}
+
+	logger.Println("DNS错误告警邮件发送成功")
 }
 
 /*
