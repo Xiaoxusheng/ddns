@@ -1,235 +1,172 @@
-# DDNS 动态解析
+# DDNS 动态解析（v2）
 
-基于 Go 的 DDNS 动态解析程序，适用于 Linux 服务器。
+基于 Go 的 IPv6 DDNS 程序，把服务器的公网 IPv6 自动维护到阿里云 DNS 的 AAAA 记录上。
 
-程序会定期获取服务器当前公网 IPv4 / IPv6 地址。当 IPv6 地址发生变化时，自动更新阿里云 DNS 的 AAAA 记录，并通过邮件发送当前 IP 信息。
+v2 是重写版：**零第三方依赖**（纯标准库，`go build` 不需要联网拉包），并且把「是否要更新」的判断从本地文件改成了**与阿里云线上记录对账**。
 
-## 功能
+## 与旧版的关键区别
 
-* 支持阿里云 DNS IPv6（AAAA）动态解析
-* IPv6 获取采用“公网 API 优先、本地网卡兜底”
-* IPv4 获取公网地址
-* 自动检测 IPv6 是否发生变化
-* IPv6 变化后自动更新阿里云 DNS
-* DNS 更新成功后保存当前 IPv6
-* 支持 QQ 邮箱 SMTP 发送通知邮件
-* 支持 systemd 开机自启动
-* 支持日志文件记录
-* 支持通过 `config.json` 独立配置，不需要修改 Go 源码
+| 项目 | 旧版 | v2 |
+| --- | --- | --- |
+| 判断依据 | 读 `ip.txt` 与当前 IP 比较 | 每轮查阿里云线上的真实记录值 |
+| 记录被删 | 永久失败（RecordID 写死） | 自动重新定位，不存在则新建 |
+| RecordID 变化 | 永久失败 | 按域名 + 主机记录 + 类型重新查找 |
+| 取址 | 取网卡上第一个公网地址 | 排除 deprecated / tentative / dadfailed / ULA，取最新一个，支持前缀白名单 |
+| 失败重试 | 等下一个周期 | 单轮内退避重试 + 失败后 60s 快速重试 |
+| 写后校验 | 无 | 写入后回读确认 |
+| 告警 | 每次失败都发邮件 | 连续第 3/9/27 次才发，恢复时补一条 |
+| 通知渠道 | 仅邮件 | 邮件 + Webhook（Server酱 / Bark 等） |
+| 日志 | 按天 | 按天 + 按大小轮转 |
+| 单实例 | 无 | flock 互斥 |
+| 依赖 | 阿里云 SDK + email 库 | 无 |
+
+## 工作原理
+
+```text
+启动 / 每 5 分钟
+      ↓
+读网卡上的全球 IPv6（排除已废弃的旧前缀地址）
+      ↓
+查阿里云：@.example.com 的 AAAA 记录现在是什么
+      ↓
+  一致 ──→ 什么都不做（静默）
+      ↓
+  不一致 ─→ 写入 → 回读校验 → 发通知
+      ↓
+  记录不存在 ─→ 直接新建 → 发通知
+```
 
 ## 项目结构
 
 ```text
 ddns/
-├── ddns
-├── config.json
-├── ip.txt
-└── logs/
-    └── ddns_YYYYMMDD.log
+├── ddns.go          主程序
+├── lock_unix.go     Linux 单实例锁（flock）
+├── lock_windows.go  Windows 占位实现（仅为本地能编译）
+├── config.json      配置
+├── ip.txt           上一次同步成功的地址（仅作记录）
+├── state.json       失败计数等运行状态
+└── logs/            ddns_YYYYMMDD.log
 ```
 
-其中：
-
-* `ddns`：编译后的程序
-* `config.json`：程序配置文件
-* `ip.txt`：保存上一次成功同步的 IPv6 地址，由程序自动生成
-* `logs/`：运行日志目录
-
 ## 配置
-
-程序使用 `config.json`，不再把 AccessKey、邮箱等信息直接写在代码中。
-
-示例：
 
 ```json
 {
   "aliyun": {
-    "access_key_id": "你的阿里云AccessKeyID",
-    "access_key_secret": "你的阿里云AccessKeySecret",
+    "access_key_id": "你的AccessKeyID",
+    "access_key_secret": "你的AccessKeySecret",
     "region_id": "cn-hangzhou",
-    "record_id": "你的DNS记录ID",
+    "record_id": "",
+    "domain": "example.com",
     "rr": "@",
-    "type": "AAAA"
+    "type": "AAAA",
+    "ttl": "600"
   },
   "email": {
     "username": "你的QQ邮箱@qq.com",
-    "password": "你的QQ邮箱SMTP授权码",
+    "password": "SMTP授权码",
     "to": "接收通知的邮箱@qq.com",
     "smtp_host": "smtp.qq.com",
     "smtp_port": 587
   },
   "ddns": {
-    "interval_hours": 6,
+    "interval_minutes": 5,
     "ip_file": "./ip.txt",
+    "state_file": "./state.json",
+    "net_interface": "",
+    "preferred_prefix": "",
     "ipv6_api": "https://v6.ip.zxinc.org/info.php?type=json",
     "ipv4_api": "https://v4.ip.zxinc.org/info.php?type=json",
     "request_timeout_seconds": 10
   },
   "log": {
     "directory": "./logs",
-    "level": "info"
+    "level": "info",
+    "max_size_mb": 10,
+    "max_files": 5
+  },
+  "webhook": {
+    "url": ""
   }
 }
 ```
 
-### 阿里云配置
+### 阿里云
 
-`record_id` 为需要更新的阿里云 DNS 解析记录 ID。
+- **推荐只填 `domain` + `rr` + `type`**，程序每次按名字查记录，不再依赖固定 ID
+- `record_id` 留空即可；如果只填了 `record_id`，启动时会自动反查出域名
+  （注意：记录被删过之后旧 ID 会失效，此时必须改用 `domain`）
+- `rr` 为 `@` 表示根域名，填 `home` 表示 `home.example.com`
 
-例如：
+### 更新频率
 
-```text
-域名：example.com
-类型：AAAA
-主机记录：@
-```
-
-表示更新：
+三个字段都支持，优先级从高到低：
 
 ```text
-example.com
+interval_seconds  >  interval_minutes  >  interval_hours
 ```
 
-如果：
-
-```text
-主机记录：home
-```
-
-则更新：
-
-```text
-home.example.com
-```
-
-### 邮箱配置
-
-程序使用 SMTP 发送 IP 通知邮件。
-
-以 QQ 邮箱为例：
+推荐直接写：
 
 ```json
-{
-  "username": "123456@qq.com",
-  "password": "SMTP授权码",
-  "to": "接收邮件的邮箱@qq.com",
-  "smtp_host": "smtp.qq.com",
-  "smtp_port": 587
-}
+"interval_minutes": 5
 ```
 
-`password` 填写邮箱的 **SMTP 授权码**，不是 QQ 邮箱登录密码。
+最小 30 秒，防止把阿里云接口打爆。默认 300 秒。
 
-## IPv6 获取逻辑
+> 旧版只认 `interval_hours`，当年写进去的 `interval_minutes` 是不生效的，v2 修好了。
 
-程序获取 IPv6 时按照以下顺序执行：
+### 取址
 
-```text
-公网 IPv6 API
-      │
-      ├── 获取成功
-      │      ↓
-      │    使用该 IPv6
-      │
-      └── 获取失败
-             ↓
-       扫描 Linux 本地网卡
-             ↓
-       查找公网 IPv6
-             ↓
-          使用该 IPv6
-```
-
-本地网卡获取时会排除：
-
-```text
-IPv4
-::1
-::
-fe80::/10 链路本地地址
-IPv6 组播地址
-非 Global Unicast 地址
-```
-
-因此不依赖公网 API 时，也可以直接从服务器本地网卡获取公网 IPv6。
+- `net_interface` 留空 = 自动挑选物理网卡（自动跳过 docker/veth/br- 等虚拟网卡）
+- 指定网卡可写成 `"enp4s0"`
+- `preferred_prefix` 是应急开关，例如 `"2409:8a4c:c416:"`，只认这个前缀的地址
 
 ## 编译
 
-安装 Go 后执行：
-
 ```bash
-go mod tidy
-go build -o ddns .
+go build -trimpath -ldflags "-s -w" -o ddns .
 ```
 
-编译完成：
+交叉编译到 Linux（在 Windows 上也可以）：
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o ddns .
+```
+
+## 运行
+
+```bash
+# 常驻（配合 systemd 使用）
+./ddns -c /home/ipv4/config.json
+
+# 只跑一轮就退出
+./ddns -c config.json -once
+
+# 只读演练：只打印判定过程，绝不写 DNS（改配置前先用它验证）
+./ddns -c config.json -once -dry-run
+
+# 自检：打印候选地址、选中哪一个、线上记录是什么
+./ddns -c config.json -check
+
+# 版本
+./ddns -v
+```
+
+`-check` 的输出示例：
 
 ```text
-ddns
+已由 record_id 反查出目标记录: @.xyx.homes AAAA (当前值 2409:8a4c:c416:f074:...)
+目标记录: @.xyx.homes AAAA，TTL 600
+  候选    2409:8a4c:c415:5c04:... (enp4s0)     ← 旧前缀，已不可达
+  候选 -> 2409:8a4c:c416:f074:... (enp4s0)     ← 实际采用
+线上记录: @.xyx.homes AAAA = 2409:8a4c:c416:f074:... (TTL 600)
 ```
 
-## 手动运行
+## systemd
 
-进入程序目录：
-
-```bash
-cd /home/ipv4
-```
-
-执行：
-
-```bash
-./ddns
-```
-
-启动后会立即执行一次 DDNS 检查。
-
-## 使用 `go run`
-
-开发测试时可以：
-
-```bash
-go run ddns.go
-```
-
-不建议生产环境长期使用：
-
-```bash
-nohup go run ddns.go &
-```
-
-生产环境建议编译成二进制：
-
-```bash
-go build -o ddns .
-```
-
-然后使用 systemd 管理。
-
-## systemd 开机启动
-
-假设程序目录：
-
-```text
-/home/ipv4/
-```
-
-文件：
-
-```text
-/home/ipv4/ddns
-/home/ipv4/config.json
-/home/ipv4/ip.txt
-/home/ipv4/logs/
-```
-
-创建：
-
-```text
-/etc/systemd/system/ddns.service
-```
-
-内容：
+`/etc/systemd/system/ddns.service`：
 
 ```ini
 [Unit]
@@ -240,218 +177,87 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/ipv4
-ExecStart=/home/ipv4/ddns
+ExecStart=/home/ipv4/ddns -c /home/ipv4/config.json
 Restart=always
 RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-重新加载：
-
 ```bash
 systemctl daemon-reload
-```
-
-设置开机启动：
-
-```bash
-systemctl enable ddns.service
-```
-
-启动：
-
-```bash
-systemctl start ddns.service
-```
-
-查看状态：
-
-```bash
+systemctl enable --now ddns.service
 systemctl status ddns.service
 ```
 
-确认是否已经启用：
+## 通知
 
-```bash
-systemctl is-enabled ddns.service
+### 邮件
+
+填了 `email.username` / `password` / `to` 才会发。`password` 是 SMTP 授权码，不是登录密码。
+
+发送时机：
+
+- 地址变更并写入成功
+- 连续失败第 3、9、27 次
+- 从失败状态恢复
+
+### Webhook（Server酱 / Bark）
+
+```json
+"webhook": {
+  "url": "https://sctapi.ftqq.com/SCT******.send"
+}
 ```
 
-正常返回：
+程序会自动追加 `title` 和 `desp` 参数，Server酱、Bark 这类都适用。
 
-```text
-enabled
-```
-
-## 查看日志
-
-程序日志：
+## 日志与状态
 
 ```bash
-ls -lh /home/ipv4/logs/
-```
-
-实时查看 systemd 日志：
-
-```bash
+tail -f /home/ipv4/logs/ddns_$(date +%Y%m%d).log
 journalctl -u ddns.service -f
 ```
 
-查看最近日志：
+- 日志按天新建，单文件超过 `max_size_mb` 会轮转，保留 `max_files` 份
+- `state.json` 记录失败计数与上次成功地址，删掉只会让告警重新计数
+- `ip.txt` 只作人工排查用，不再是判断依据
 
-```bash
-journalctl -u ddns.service -n 100
-```
+## 排错
 
-## IPv6 记录保存
-
-程序会在：
-
-```text
-/home/ipv4/ip.txt
-```
-
-保存上一次**成功同步到阿里云 DNS** 的 IPv6 地址。
-
-例如：
-
-```text
-2409:xxxx:xxxx:xxxx::1234
-```
-
-只有当当前 IPv6 与 `ip.txt` 中保存的 IPv6 不同时，程序才会执行 DNS 更新。
-
-如果阿里云 DNS 更新失败，则不会覆盖原来的 `ip.txt`，下一次任务仍会继续尝试。
-
-## 执行周期
-
-默认：
-
-```json
-"interval_hours": 6
-```
-
-即：
-
-```text
-启动
- ↓
-立即检查一次
- ↓
-等待 6 小时
- ↓
-再次检查
- ↓
-循环
-```
-
-可以修改，例如每 1 小时检查：
-
-```json
-"interval_hours": 1
-```
-
-每天一次：
-
-```json
-"interval_hours": 24
-```
-
-## 邮件通知
-
-当检测到 IPv6 地址变化并且 DNS 更新成功后，程序会发送 IP 通知邮件。
-
-邮件包含：
-
-```text
-IPv6
-IPv4
-更新时间
-```
-
-例如：
-
-```text
-IPv6:
-2409:xxxx:xxxx::1234
-
-IPv4:
-152.xxx.xxx.xxx
-
-更新时间:
-2026-08-24 12:00:00
-```
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `已有实例在运行` | 已有进程持有 `.ddns.lock` | `systemctl stop ddns` 后重试 |
+| `反查 record_id 失败` | 记录被删过，旧 ID 失效 | 配置里改填 `domain` |
+| `没有可用地址（全部被过滤）` | 网卡上只有 ULA 或已废弃地址 | 看 `-check` 输出，必要时配 `preferred_prefix` |
+| `回读校验失败` | 写入没生效，多半是权限或记录被锁 | 检查 AccessKey 权限、记录是否被锁定 |
+| 通知没收到 | 邮件或 webhook 未配置 | 看日志里的「未配置任何通知渠道」 |
 
 ## 安全建议
 
-`config.json` 包含阿里云 AccessKey 和邮箱 SMTP 授权码，建议限制文件权限：
+`config.json` 里有 AccessKey 和邮箱授权码：
 
 ```bash
-chmod 600 /home/ipv4/config.json
+chmod 600 config.json
 ```
 
-不要将真实的：
+也可以改用环境变量，覆盖配置文件里的值：
 
-```text
-AccessKeyID
-AccessKeySecret
-SMTP授权码
+```bash
+export DDNS_ALIYUN_AK=xxx
+export DDNS_ALIYUN_SK=xxx
 ```
 
-提交到 GitHub 或其他公开仓库。
-
-建议将：
+`.gitignore` 建议包含：
 
 ```text
 config.json
 ip.txt
+state.json
 logs/
 ddns
-```
-
-加入 `.gitignore`。
-
-## 常用命令
-
-启动：
-
-```bash
-systemctl start ddns
-```
-
-停止：
-
-```bash
-systemctl stop ddns
-```
-
-重启：
-
-```bash
-systemctl restart ddns
-```
-
-查看状态：
-
-```bash
-systemctl status ddns
-```
-
-开机启动：
-
-```bash
-systemctl enable ddns
-```
-
-关闭开机启动：
-
-```bash
-systemctl disable ddns
-```
-
-实时日志：
-
-```bash
-journalctl -u ddns -f
+.ddns.lock
 ```

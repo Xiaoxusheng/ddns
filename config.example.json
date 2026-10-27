@@ -1,0 +1,38 @@
+{
+  "aliyun": {
+    "access_key_id": "你的AccessKeyID",
+    "access_key_secret": "你的AccessKeySecret",
+    "region_id": "cn-hangzhou",
+    "record_id": "",
+    "domain": "example.com",
+    "rr": "@",
+    "type": "AAAA",
+    "ttl": "600"
+  },
+  "email": {
+    "username": "你的邮箱@qq.com",
+    "password": "SMTP授权码",
+    "to": "接收通知的邮箱@qq.com",
+    "smtp_host": "smtp.qq.com",
+    "smtp_port": 587
+  },
+  "ddns": {
+    "interval_minutes": 5,
+    "ip_file": "./ip.txt",
+    "state_file": "./state.json",
+    "net_interface": "",
+    "preferred_prefix": "",
+    "ipv6_api": "https://v6.ip.zxinc.org/info.php?type=json",
+    "ipv4_api": "https://v4.ip.zxinc.org/info.php?type=json",
+    "request_timeout_seconds": 10
+  },
+  "log": {
+    "directory": "./logs",
+    "level": "info",
+    "max_size_mb": 10,
+    "max_files": 5
+  },
+  "webhook": {
+    "url": ""
+  }
+}

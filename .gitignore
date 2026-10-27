@@ -1,0 +1,19 @@
+# 敏感配置：含阿里云 AccessKey、邮箱 SMTP 授权码，绝不入库
+config.json
+aliyun.json
+*.bak
+*.bak-*
+
+# 本地备份目录
+legacy-20261027/
+
+# 运行时产物
+ip.txt
+state.json
+logs/
+ddns
+ddns.exe
+.ddns.lock
+
+# IDE
+.idea/
